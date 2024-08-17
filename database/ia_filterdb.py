@@ -8,6 +8,7 @@ from umongo import Instance, Document, fields
 from motor.motor_asyncio import AsyncIOMotorClient
 from marshmallow.exceptions import ValidationError
 from info import DATABASE_URL, DATABASE_NAME, COLLECTION_NAME, MAX_BTN
+from utils import get_settings, save_group_settings
 
 client = AsyncIOMotorClient(DATABASE_URL)
 db = client[DATABASE_NAME]
