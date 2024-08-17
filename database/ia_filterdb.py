@@ -8,7 +8,6 @@ from umongo import Instance, Document, fields
 from motor.motor_asyncio import AsyncIOMotorClient
 from marshmallow.exceptions import ValidationError
 from info import DATABASE_URL, DATABASE_NAME, COLLECTION_NAME, MAX_BTN
-from utils import get_settings, save_group_settings
 
 client = AsyncIOMotorClient(DATABASE_URL)
 db = client[DATABASE_NAME]
@@ -39,8 +38,8 @@ async def save_file(media):
     try:
         file = Media(
             file_id=file_id,
-            file_ref=file_ref,
             file_name=file_name,
+            file_ref=file_ref,
             file_size=media.file_size,
             file_type=media.file_type,
             mime_type=media.mime_type
@@ -75,6 +74,9 @@ async def get_search_results(query, max_results=MAX_BTN, offset=0, lang=None):
     filter = {'file_name': regex}
     cursor = Media.find(filter)
 
+    if file_type:
+        filter['file_type'] = file_type
+
     # Sort by recent
     cursor.sort('$natural', -1)
 
@@ -97,6 +99,9 @@ async def get_search_results(query, max_results=MAX_BTN, offset=0, lang=None):
         next_offset = ''       
     return files, next_offset, total_results
     
+def encode_file_ref(file_ref: bytes) -> str:
+    return base64.urlsafe_b64encode(file_ref).decode().rstrip("=")
+
 async def delete_files(query):
     query = query.strip()
     if not query:
@@ -135,12 +140,7 @@ def encode_file_id(s: bytes) -> str:
             r += bytes([i])
     return base64.urlsafe_b64encode(r).decode().rstrip("=")
 
-def encode_file_ref(file_ref: bytes) -> str:
-    return base64.urlsafe_b64encode(file_ref).decode().rstrip("=")
-
-
 def unpack_new_file_id(new_file_id):
-    """Return file_id, file_ref"""
     decoded = FileId.decode(new_file_id)
     file_id = encode_file_id(
         pack(
