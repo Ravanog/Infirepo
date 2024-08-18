@@ -7,11 +7,11 @@ from pymongo.errors import DuplicateKeyError
 from umongo import Instance, Document, fields
 from motor.motor_asyncio import AsyncIOMotorClient
 from marshmallow.exceptions import ValidationError
-from info import DATABASE_URL, DATABASE_NAME, COLLECTION_NAME, MAX_BTN
+from info import DATABASE_URI, DATABASE_NAME, COLLECTION_NAME, MAX_BTN
 
-client = AsyncIOMotorClient(DATABASE_URL)
-db = client[DATABASE_NAME]
-instance = Instance.from_db(db)
+client = AsyncIOMotorClient(DATABASE_URI)
+mydb = client[DATABASE_NAME]
+instance = Instance.from_db(mydb)
 
 @instance.register
 class Media(Document):
@@ -19,46 +19,47 @@ class Media(Document):
     file_ref = fields.StrField(allow_none=True)
     file_name = fields.StrField(required=True)
     file_size = fields.IntField(required=True)
-    file_type = fields.StrField(allow_none=True)
     mime_type = fields.StrField(allow_none=True)
     caption = fields.StrField(allow_none=True)
+    file_type = fields.StrField(allow_none=True)
 
     class Meta:
         indexes = ('$file_name', )
         collection_name = COLLECTION_NAME
 
+async def get_files_db_size():
+    return (await mydb.command("dbstats"))['dataSize']
+    
 async def save_file(media):
     """Save file in database"""
 
     # TODO: Find better way to get same file_id for same media to avoid duplicates
     file_id, file_ref = unpack_new_file_id(media.file_id)
-    #file_id = unpack_new_file_id(media.file_id)
-    file_name = re.sub(r"@\w+|(_|\-|\.|\+)", " ", str(media.file_name))
-    file_caption = re.sub(r"@\w+|(_|\-|\.|\+)", " ", str(media.caption))
+    file_name = re.sub(r"(_|\-|\.|\+)", " ", str(media.file_name))
     try:
         file = Media(
             file_id=file_id,
-            file_name=file_name,
             file_ref=file_ref,
+            file_name=file_name,
             file_size=media.file_size,
-            file_type=media.file_type,
-            mime_type=media.mime_type
+            mime_type=media.mime_type,
+            caption=media.caption.html if media.caption else None,
+            file_type=media.mime_type.split('/')[0]
         )
     except ValidationError:
-        print(f'Saving Error - {file_name}')
+        print('Error occurred while saving file in database')
         return 'err'
     else:
         try:
             await file.commit()
         except DuplicateKeyError:      
-            print(f'Already Saved - {file_name}')
+            print(f'{getattr(media, "file_name", "NO_FILE")} is already saved in database') 
             return 'dup'
         else:
-            print(f'Saved - {file_name}')
+            print(f'{getattr(media, "file_name", "NO_FILE")} is saved to database')
             return 'suc'
 
 async def get_search_results(query, max_results=MAX_BTN, offset=0, lang=None):
-    query = str(query) # to ensure the query is string to stripe.
     query = query.strip()
     if not query:
         raw_pattern = '.'
@@ -70,16 +71,9 @@ async def get_search_results(query, max_results=MAX_BTN, offset=0, lang=None):
         regex = re.compile(raw_pattern, flags=re.IGNORECASE)
     except:
         regex = query
-
     filter = {'file_name': regex}
     cursor = Media.find(filter)
-
-    if file_type:
-        filter['file_type'] = file_type
-
-    # Sort by recent
     cursor.sort('$natural', -1)
-
     if lang:
         lang_files = [file async for file in cursor if lang in file.file_name.lower()]
         files = lang_files[offset:][:max_results]
@@ -88,10 +82,7 @@ async def get_search_results(query, max_results=MAX_BTN, offset=0, lang=None):
         if next_offset >= total_results:
             next_offset = ''
         return files, next_offset, total_results
-        
-    # Slice files according to offset and max results
     cursor.skip(offset).limit(max_results)
-    # Get list of files
     files = await cursor.to_list(length=max_results)
     total_results = await Media.count_documents(filter)
     next_offset = offset + max_results
@@ -99,10 +90,7 @@ async def get_search_results(query, max_results=MAX_BTN, offset=0, lang=None):
         next_offset = ''       
     return files, next_offset, total_results
     
-def encode_file_ref(file_ref: bytes) -> str:
-    return base64.urlsafe_b64encode(file_ref).decode().rstrip("=")
-
-async def delete_files(query):
+async def get_bad_files(query, file_type=None, offset=0, filter=False):
     query = query.strip()
     if not query:
         raw_pattern = '.'
@@ -110,16 +98,19 @@ async def delete_files(query):
         raw_pattern = r'(\b|[\.\+\-_])' + query + r'(\b|[\.\+\-_])'
     else:
         raw_pattern = query.replace(' ', r'.*[\s\.\+\-_]')
-    
     try:
         regex = re.compile(raw_pattern, flags=re.IGNORECASE)
     except:
-        regex = query
+        return []
     filter = {'file_name': regex}
-    total = await Media.count_documents(filter)
-    files = Media.find(filter)
-    return total, files
-
+    if file_type:
+        filter['file_type'] = file_type
+    total_results = await Media.count_documents(filter)
+    cursor = Media.find(filter)
+    cursor.sort('$natural', -1)
+    files = await cursor.to_list(length=total_results)
+    return files, total_results
+    
 async def get_file_details(query):
     filter = {'file_id': query}
     cursor = Media.find(filter)
@@ -136,11 +127,14 @@ def encode_file_id(s: bytes) -> str:
             if n:
                 r += b"\x00" + bytes([n])
                 n = 0
-
             r += bytes([i])
     return base64.urlsafe_b64encode(r).decode().rstrip("=")
 
+def encode_file_ref(file_ref: bytes) -> str:
+    return base64.urlsafe_b64encode(file_ref).decode().rstrip("=")
+
 def unpack_new_file_id(new_file_id):
+    """Return file_id, file_ref"""
     decoded = FileId.decode(new_file_id)
     file_id = encode_file_id(
         pack(
@@ -153,3 +147,4 @@ def unpack_new_file_id(new_file_id):
     )
     file_ref = encode_file_ref(decoded.file_reference)
     return file_id, file_ref
+    
